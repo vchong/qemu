@@ -854,7 +854,8 @@ static void gic_deactivate_irq(GICState *s, int cpu, int irq, MemTxAttrs attrs)
     gic_clear_active(s, irq, cpu);
 }
 
-static void gic_complete_irq(GICState *s, int cpu, int irq, MemTxAttrs attrs)
+static void gic_complete_irq(GICState *s, int cpu, int irq, MemTxAttrs attrs,
+                             bool ns_irq)
 {
     int cm = 1 << cpu;
     int group;
@@ -922,7 +923,7 @@ static void gic_complete_irq(GICState *s, int cpu, int irq, MemTxAttrs attrs)
 
     group = gic_has_groups(s) && gic_test_group(s, irq, cpu);
 
-    if (gic_cpu_ns_access(s, cpu, attrs) && !group) {
+    if (ns_irq && !group) {
         DPRINTF("Non-secure EOI for Group0 interrupt %d ignored\n", irq);
         return;
     }
@@ -1701,7 +1702,8 @@ static MemTxResult gic_cpu_write(GICState *s, int cpu, int offset,
         }
         break;
     case 0x10: /* End Of Interrupt */
-        gic_complete_irq(s, cpu, value & 0x3ff, attrs);
+        gic_complete_irq(s, cpu, value & 0x3ff, attrs,
+                         gic_cpu_ns_access(s, cpu, attrs));
         return MEMTX_OK;
     case 0x1c: /* Aliased Binary Point */
         if (!gic_has_groups(s) || (gic_cpu_ns_access(s, cpu, attrs))) {
