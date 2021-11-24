@@ -15,10 +15,14 @@
 #include "hw/i386/sgx-epc.h"
 #include "hw/mem/memory-device.h"
 #include "monitor/qdev.h"
+#include "monitor/monitor.h"
+#include "monitor/hmp-target.h"
 #include "qapi/error.h"
+#include "qapi/qapi-commands-misc-target.h"
 #include "exec/address-spaces.h"
-#include "hw/i386/sgx.h"
 #include "sysemu/hw_accel.h"
+#include "sysemu/reset.h"
+#include <sys/ioctl.h>
 
 #define SGX_MAX_EPC_SECTIONS            8
 #define SGX_CPUID_EPC_INVALID           0x0
@@ -26,6 +30,11 @@
 /* A valid EPC section. */
 #define SGX_CPUID_EPC_SECTION           0x1
 #define SGX_CPUID_EPC_MASK              0xF
+
+#define SGX_MAGIC 0xA4
+#define SGX_IOC_VEPC_REMOVE_ALL       _IO(SGX_MAGIC, 0x04)
+
+#define RETRY_NUM                       2
 
 static uint64_t sgx_calc_section_metric(uint64_t low, uint64_t high)
 {
@@ -57,7 +66,47 @@ static uint64_t sgx_calc_host_epc_section_size(void)
     return size;
 }
 
-SGXInfo *sgx_get_capabilities(Error **errp)
+static void sgx_epc_reset(void *opaque)
+{
+    PCMachineState *pcms = PC_MACHINE(qdev_get_machine());
+    HostMemoryBackend *hostmem;
+    SGXEPCDevice *epc;
+    int failures;
+    int fd, i, j, r;
+    static bool warned = false;
+
+    /*
+     * The second pass is needed to remove SECS pages that could not
+     * be removed during the first.
+     */
+    for (i = 0; i < RETRY_NUM; i++) {
+        failures = 0;
+        for (j = 0; j < pcms->sgx_epc.nr_sections; j++) {
+            epc = pcms->sgx_epc.sections[j];
+            hostmem = MEMORY_BACKEND(epc->hostmem);
+            fd = memory_region_get_fd(host_memory_backend_get_memory(hostmem));
+
+            r = ioctl(fd, SGX_IOC_VEPC_REMOVE_ALL);
+            if (r == -ENOTTY && !warned) {
+                warned = true;
+                warn_report("kernel does not support SGX_IOC_VEPC_REMOVE_ALL");
+                warn_report("SGX might operate incorrectly in the guest after reset");
+                break;
+            } else if (r > 0) {
+                /* SECS pages remain */
+                failures++;
+                if (i == 1) {
+                    error_report("cannot reset vEPC section %d", j);
+                }
+            }
+        }
+        if (!failures) {
+            break;
+        }
+     }
+}
+
+SGXInfo *qmp_query_sgx_capabilities(Error **errp)
 {
     SGXInfo *info = NULL;
     uint32_t eax, ebx, ecx, edx;
@@ -85,7 +134,7 @@ SGXInfo *sgx_get_capabilities(Error **errp)
     return info;
 }
 
-SGXInfo *sgx_get_info(Error **errp)
+SGXInfo *qmp_query_sgx(Error **errp)
 {
     SGXInfo *info = NULL;
     X86MachineState *x86ms;
@@ -115,13 +164,34 @@ SGXInfo *sgx_get_info(Error **errp)
     return info;
 }
 
-int sgx_epc_get_section(int section_nr, uint64_t *addr, uint64_t *size)
+void hmp_info_sgx(Monitor *mon, const QDict *qdict)
+{
+    Error *err = NULL;
+    g_autoptr(SGXInfo) info = qmp_query_sgx(&err);
+
+    if (err) {
+        error_report_err(err);
+        return;
+    }
+    monitor_printf(mon, "SGX support: %s\n",
+                   info->sgx ? "enabled" : "disabled");
+    monitor_printf(mon, "SGX1 support: %s\n",
+                   info->sgx1 ? "enabled" : "disabled");
+    monitor_printf(mon, "SGX2 support: %s\n",
+                   info->sgx2 ? "enabled" : "disabled");
+    monitor_printf(mon, "FLC support: %s\n",
+                   info->flc ? "enabled" : "disabled");
+    monitor_printf(mon, "size: %" PRIu64 "\n",
+                   info->section_size);
+}
+
+bool sgx_epc_get_section(int section_nr, uint64_t *addr, uint64_t *size)
 {
     PCMachineState *pcms = PC_MACHINE(qdev_get_machine());
     SGXEPCDevice *epc;
 
     if (pcms->sgx_epc.size == 0 || pcms->sgx_epc.nr_sections <= section_nr) {
-        return 1;
+        return true;
     }
 
     epc = pcms->sgx_epc.sections[section_nr];
@@ -129,7 +199,7 @@ int sgx_epc_get_section(int section_nr, uint64_t *addr, uint64_t *size)
     *addr = epc->addr;
     *size = memory_device_get_region_size(MEMORY_DEVICE(epc), &error_fatal);
 
-    return 0;
+    return false;
 }
 
 void pc_machine_init_sgx_epc(PCMachineState *pcms)
@@ -167,4 +237,7 @@ void pc_machine_init_sgx_epc(PCMachineState *pcms)
     }
 
     memory_region_set_size(&sgx_epc->mr, sgx_epc->size);
+
+    /* register the reset callback for sgx epc */
+    qemu_register_reset(sgx_epc_reset, NULL);
 }
