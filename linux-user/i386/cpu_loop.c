@@ -18,8 +18,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu.h"
+#include "qemu/timer.h"
 #include "user-internals.h"
 #include "cpu_loop-common.h"
 #include "signal-common.h"
@@ -137,7 +137,7 @@ static void emulate_vsyscall(CPUX86State *env)
     }
 
     /*
-     * Validate the the pointer arguments.
+     * Validate the pointer arguments.
      */
     switch (syscall) {
     case TARGET_NR_gettimeofday:

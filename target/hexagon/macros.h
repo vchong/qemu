@@ -1,5 +1,5 @@
 /*
- *  Copyright(c) 2019-2021 Qualcomm Innovation Center, Inc. All Rights Reserved.
+ *  Copyright(c) 2019-2022 Qualcomm Innovation Center, Inc. All Rights Reserved.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -87,11 +87,28 @@
  *
  *
  * For qemu, we look for a load in slot 0 when there is  a store in slot 1
- * in the same packet.  When we see this, we call a helper that merges the
- * bytes from the store buffer with the value loaded from memory.
+ * in the same packet.  When we see this, we call a helper that probes the
+ * load to make sure it doesn't fault.  Then, we process the store ahead of
+ * the actual load.
+
  */
-#define CHECK_NOSHUF \
+#define CHECK_NOSHUF(VA, SIZE) \
     do { \
+        if (insn->slot == 0 && pkt->pkt_has_store_s1) { \
+            probe_noshuf_load(VA, SIZE, ctx->mem_idx); \
+            process_store(ctx, pkt, 1); \
+        } \
+    } while (0)
+
+#define CHECK_NOSHUF_PRED(GET_EA, SIZE, PRED) \
+    do { \
+        TCGLabel *label = gen_new_label(); \
+        tcg_gen_brcondi_tl(TCG_COND_EQ, PRED, 0, label); \
+        GET_EA; \
+        if (insn->slot == 0 && pkt->pkt_has_store_s1) { \
+            probe_noshuf_load(EA, SIZE, ctx->mem_idx); \
+        } \
+        gen_set_label(label); \
         if (insn->slot == 0 && pkt->pkt_has_store_s1) { \
             process_store(ctx, pkt, 1); \
         } \
@@ -99,37 +116,37 @@
 
 #define MEM_LOAD1s(DST, VA) \
     do { \
-        CHECK_NOSHUF; \
+        CHECK_NOSHUF(VA, 1); \
         tcg_gen_qemu_ld8s(DST, VA, ctx->mem_idx); \
     } while (0)
 #define MEM_LOAD1u(DST, VA) \
     do { \
-        CHECK_NOSHUF; \
+        CHECK_NOSHUF(VA, 1); \
         tcg_gen_qemu_ld8u(DST, VA, ctx->mem_idx); \
     } while (0)
 #define MEM_LOAD2s(DST, VA) \
     do { \
-        CHECK_NOSHUF; \
+        CHECK_NOSHUF(VA, 2); \
         tcg_gen_qemu_ld16s(DST, VA, ctx->mem_idx); \
     } while (0)
 #define MEM_LOAD2u(DST, VA) \
     do { \
-        CHECK_NOSHUF; \
+        CHECK_NOSHUF(VA, 2); \
         tcg_gen_qemu_ld16u(DST, VA, ctx->mem_idx); \
     } while (0)
 #define MEM_LOAD4s(DST, VA) \
     do { \
-        CHECK_NOSHUF; \
+        CHECK_NOSHUF(VA, 4); \
         tcg_gen_qemu_ld32s(DST, VA, ctx->mem_idx); \
     } while (0)
 #define MEM_LOAD4u(DST, VA) \
     do { \
-        CHECK_NOSHUF; \
+        CHECK_NOSHUF(VA, 4); \
         tcg_gen_qemu_ld32s(DST, VA, ctx->mem_idx); \
     } while (0)
 #define MEM_LOAD8u(DST, VA) \
     do { \
-        CHECK_NOSHUF; \
+        CHECK_NOSHUF(VA, 8); \
         tcg_gen_qemu_ld64(DST, VA, ctx->mem_idx); \
     } while (0)
 
@@ -268,7 +285,7 @@ static inline void gen_pred_cancel(TCGv pred, int slot_num)
 
 #define fVSATUVALN(N, VAL) \
     ({ \
-        (((int)(VAL)) < 0) ? 0 : ((1LL << (N)) - 1); \
+        (((int64_t)(VAL)) < 0) ? 0 : ((1LL << (N)) - 1); \
     })
 #define fSATUVALN(N, VAL) \
     ({ \

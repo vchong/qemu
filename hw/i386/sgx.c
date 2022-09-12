@@ -295,7 +295,7 @@ void pc_machine_init_sgx_epc(PCMachineState *pcms)
         return;
     }
 
-    sgx_epc->base = 0x100000000ULL + x86ms->above_4g_mem_size;
+    sgx_epc->base = x86ms->above_4g_mem_start + x86ms->above_4g_mem_size;
 
     memory_region_init(&sgx_epc->mr, OBJECT(pcms), "sgx-epc", UINT64_MAX);
     memory_region_add_subregion(get_system_memory(), sgx_epc->base,
@@ -315,7 +315,7 @@ void pc_machine_init_sgx_epc(PCMachineState *pcms)
     }
 
     if ((sgx_epc->base + sgx_epc->size) < sgx_epc->base) {
-        error_report("Size of all 'sgx-epc' =0x%"PRIu64" causes EPC to wrap",
+        error_report("Size of all 'sgx-epc' =0x%"PRIx64" causes EPC to wrap",
                      sgx_epc->size);
         exit(EXIT_FAILURE);
     }
